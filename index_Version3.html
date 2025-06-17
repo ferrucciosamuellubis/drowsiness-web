@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Drowsiness Detector Web</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        .video-container { position: relative; width: 100%; height: 0; padding-bottom: 56.25%; background: #111827; border-radius: 0.5rem; overflow: hidden;}
+        .video-container video, .video-container canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover;}
+        .alert-pulse { animation: pulse 1.5s infinite;}
+        @keyframes pulse { 0% {box-shadow: 0 0 0 0 rgba(239,68,68,0.7);} 70% {box-shadow: 0 0 0 10px rgba(239,68,68,0);} 100% {box-shadow: 0 0 0 0 rgba(239,68,68,0);}}
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <div class="container mx-auto px-4 py-8">
+        <h1 class="text-3xl font-bold mb-4 text-center text-gray-800">Drowsiness Detector (Web Demo)</h1>
+        <div class="video-container mb-6">
+            <video id="videoFeed" autoplay muted class="w-full h-full"></video>
+            <canvas id="overlayCanvas" class="absolute top-0 left-0 w-full h-full"></canvas>
+        </div>
+        <div class="flex justify-center gap-4 mb-6">
+            <button id="startBtn" class="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center">
+                <i class="fas fa-play mr-2"></i> Start Detection
+            </button>
+            <button id="stopBtn" class="px-6 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 flex items-center" disabled>
+                <i class="fas fa-stop mr-2"></i> Stop
+            </button>
+            <button id="testAlarmBtn" class="px-6 py-2 bg-yellow-500 text-white rounded-lg hover:bg-yellow-600 flex items-center">
+                <i class="fas fa-bell mr-2"></i> Test Alarm
+            </button>
+        </div>
+        <div id="alertSection" class="mb-6 hidden">
+            <div class="bg-red-100 border-l-4 border-red-500 text-red-700 p-4 rounded-lg flex items-center alert-pulse">
+                <i class="fas fa-exclamation-triangle text-2xl mr-4"></i>
+                <div>
+                    <h3 class="font-bold">DROWSINESS DETECTED!</h3>
+                    <p>Alarm triggered. Please stay alert!</p>
+                </div>
+                <button id="dismissAlert" class="ml-auto text-red-700 hover:text-red-900">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+        </div>
+        <div class="bg-white rounded-xl shadow-lg p-4 max-w-md mx-auto">
+            <div class="flex flex-col gap-2">
+                <div><span class="font-semibold">EAR:</span> <span id="earValue">0.00</span></div>
+                <div><span class="font-semibold">Alarms:</span> <span id="alarmCount">0</span></div>
+            </div>
+        </div>
+    </div>
+    <audio id="alarmSound" src="https://assets.mixkit.co/sfx/preview/mixkit-alarm-wooden-block-1035.mp3" preload="auto"></audio>
+    <script>
+    // --- DOM Elements
+    const videoFeed = document.getElementById('videoFeed');
+    const overlayCanvas = document.getElementById('overlayCanvas');
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const testAlarmBtn = document.getElementById('testAlarmBtn');
+    const alertSection = document.getElementById('alertSection');
+    const dismissAlert = document.getElementById('dismissAlert');
+    const earValue = document.getElementById('earValue');
+    const alarmCount = document.getElementById('alarmCount');
+    const alarmSound = document.getElementById('alarmSound');
+
+    // --- Settings
+    const earThreshold = 0.25;
+    const consecutiveFrames = 10;
+    let isDetecting = false, lowEARFrames = 0, alarmsTriggered = 0, animationFrameId = null, modelsLoaded = false;
+
+    // --- Load Models
+    async function loadModels() {
+        await faceapi.nets.tinyFaceDetector.loadFromUri('./models');
+        await faceapi.nets.faceLandmark68TinyNet.loadFromUri('./models');
+        modelsLoaded = true;
+    }
+    loadModels();
+
+    // --- EAR Calculation
+    function calcEAR(eye) {
+        const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+        return (
+            (dist(eye[1], eye[5]) + dist(eye[2], eye[4])) /
+            (2.0 * dist(eye[0], eye[3]))
+        );
+    }
+
+    // --- Detection Loop
+    async function detectionLoop() {
+        if (!isDetecting || !modelsLoaded) return;
+        const result = await faceapi.detectSingleFace(videoFeed, new faceapi.TinyFaceDetectorOptions()).withFaceLandmarks(true);
+        const ctx = overlayCanvas.getContext('2d');
+        ctx.clearRect(0,0,overlayCanvas.width,overlayCanvas.height);
+
+        if (result && result.landmarks) {
+            const leftEye = result.landmarks.getLeftEye();
+            const rightEye = result.landmarks.getRightEye();
+            const leftEAR = calcEAR(leftEye);
+            const rightEAR = calcEAR(rightEye);
+            const avgEAR = (leftEAR + rightEAR) / 2.0;
+            earValue.textContent = avgEAR.toFixed(3);
+
+            faceapi.draw.drawDetections(overlayCanvas, [result]);
+            faceapi.draw.drawFaceLandmarks(overlayCanvas, [result]);
+
+            if (avgEAR < earThreshold) {
+                lowEARFrames++;
+                if (lowEARFrames >= consecutiveFrames) {
+                    triggerAlarm();
+                    lowEARFrames = 0;
+                }
+            } else {
+                lowEARFrames = Math.max(0, lowEARFrames - 2);
+            }
+        }
+        animationFrameId = requestAnimationFrame(detectionLoop);
+    }
+
+    // --- Alarm & UI Functions
+    function triggerAlarm() {
+        alertSection.classList.remove('hidden');
+        alarmSound.currentTime = 0;
+        alarmSound.play();
+        alarmsTriggered++;
+        alarmCount.textContent = alarmsTriggered;
+    }
+    testAlarmBtn.onclick = () => { triggerAlarm(); };
+    dismissAlert.onclick = () => alertSection.classList.add('hidden');
+
+    // --- Start/Stop Detection
+    startBtn.onclick = async function() {
+        if (isDetecting) return;
+        if (!modelsLoaded) { alert("Models not loaded yet!"); return; }
+        navigator.mediaDevices.getUserMedia({ video: true }).then(stream => {
+            videoFeed.srcObject = stream;
+            isDetecting = true;
+            startBtn.disabled = true;
+            stopBtn.disabled = false;
+            overlayCanvas.width = videoFeed.clientWidth;
+            overlayCanvas.height = videoFeed.clientHeight;
+            detectionLoop();
+        }).catch(err => { alert("Camera error: " + err.message); });
+    };
+    stopBtn.onclick = function() {
+        if (!isDetecting) return;
+        const stream = videoFeed.srcObject;
+        if (stream) stream.getTracks().forEach(track => track.stop());
+        videoFeed.srcObject = null;
+        cancelAnimationFrame(animationFrameId);
+        isDetecting = false;
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+    };
+    </script>
+</body>
+</html>
